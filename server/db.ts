@@ -57,6 +57,10 @@ export async function createPgDb(url: string): Promise<Db> {
 
 export async function createPgliteDb(dataDir?: string): Promise<Db> {
   const { PGlite } = await import('@electric-sql/pglite');
+  if (dataDir) {
+    const { mkdirSync } = await import('node:fs');
+    mkdirSync(dataDir, { recursive: true });
+  }
   const pg = dataDir ? new PGlite(dataDir) : new PGlite();
   await pg.waitReady;
   const wrap = (c: { query: (s: string, p?: unknown[]) => Promise<{ rows: unknown[]; affectedRows?: number }> }): Queryable => ({
@@ -76,6 +80,10 @@ export async function createPgliteDb(dataDir?: string): Promise<Db> {
 export async function createDbFromEnv(): Promise<Db> {
   const url = process.env.DATABASE_URL;
   if (url) return createPgDb(url);
+  if (process.env.RENDER || process.env.NODE_ENV === 'production') {
+    // Yayında sessizce geçici yerel veritabanına düşmek hesapları kaybettirir: açıkça dur.
+    throw new Error('DATABASE_URL tanımlı değil: yayın ortamında PostgreSQL bağlantısı zorunlu');
+  }
   const dir = process.env.PGLITE_DIR ?? './data/pglite';
   console.log(`[db] DATABASE_URL yok: yerel PGlite veritabanı kullanılıyor (${dir})`);
   return createPgliteDb(dir);
