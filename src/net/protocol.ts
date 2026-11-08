@@ -21,6 +21,19 @@ export interface MeView {
   canRescue: boolean;
 }
 
+export interface XpResultMsg {
+  targetUid: string;
+  consumed: number;
+  gained: number;
+  wasted: number;
+  levelBefore: number;
+  levelAfter: number;
+  levelsGained: number;
+  /** Bu yüklemede geçilen 100'lük eşikler */
+  crossed: number[];
+  xp: number;
+}
+
 export type OnlinePhase = 'stakes' | 'playing' | 'decision' | 'ended';
 
 export interface ShotBegin {
@@ -71,4 +84,6 @@ export interface ClientToServer {
   'round:decision': { continue: boolean };
   'match:leave': Record<string, never>;
   rescue: Record<string, never>;
+  'taso:flag': { uid: string; field: 'favorite' | 'locked'; value: boolean };
+  'taso:xp': { targetUid: string; sourceUids: string[] };
 }

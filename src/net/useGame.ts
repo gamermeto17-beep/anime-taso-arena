@@ -1,31 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { io, type Socket } from 'socket.io-client';
 import type { RoomId } from '../types';
-import type { MatchView, MeView, ShotBegin } from './protocol';
-
-const TOKEN_KEY = 'taso.token';
-const NAME_KEY = 'taso.name';
-
-export function getStoredName(): string {
-  try {
-    return localStorage.getItem(NAME_KEY) ?? '';
-  } catch {
-    return '';
-  }
-}
-
-function getToken(): string {
-  try {
-    let t = localStorage.getItem(TOKEN_KEY);
-    if (!t || !/^[A-Za-z0-9-]{16,64}$/.test(t)) {
-      t = crypto.randomUUID();
-      localStorage.setItem(TOKEN_KEY, t);
-    }
-    return t;
-  } catch {
-    return crypto.randomUUID();
-  }
-}
+import type { MatchView, MeView, ShotBegin, XpResultMsg } from './protocol';
 
 export interface Game {
   socket: Socket | null;
@@ -43,11 +19,17 @@ export interface Game {
   decide: (cont: boolean) => void;
   leaveMatch: () => void;
   rescue: () => void;
+  setFlag: (uid: string, field: 'favorite' | 'locked', value: boolean) => void;
+  uploadXp: (targetUid: string, sourceUids: string[]) => void;
+  xpResult: XpResultMsg | null;
+  clearXpResult: () => void;
+  /** Oturum geçersiz (süresi dolmuş/silinmiş): kullanıcı yeniden giriş yapmalı */
+  authFailed: boolean;
   /** Gelen anlık görüntünün istemci zamanı (geri sayımlar için) */
   viewAt: number;
 }
 
-export function useGame(name: string | null): Game {
+export function useGame(token: string | null): Game {
   const [socket, setSocket] = useState<Socket | null>(null);
   const [connected, setConnected] = useState(false);
   const [everConnected, setEverConnected] = useState(false);
@@ -55,16 +37,14 @@ export function useGame(name: string | null): Game {
   const [view, setView] = useState<MatchView | null>(null);
   const [viewAt, setViewAt] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  const [xpResult, setXpResult] = useState<XpResultMsg | null>(null);
+  const [authFailed, setAuthFailed] = useState(false);
   const sockRef = useRef<Socket | null>(null);
 
   useEffect(() => {
-    if (!name) return;
-    try {
-      localStorage.setItem(NAME_KEY, name);
-    } catch {
-      /* gizli mod */
-    }
-    const s = io({ auth: { token: getToken(), name }, transports: ['websocket', 'polling'] });
+    if (!token) return;
+    setAuthFailed(false);
+    const s = io({ auth: { token }, transports: ['websocket', 'polling'] });
     sockRef.current = s;
     setSocket(s);
     s.on('connect', () => {
@@ -72,7 +52,14 @@ export function useGame(name: string | null): Game {
       setEverConnected(true);
     });
     s.on('disconnect', () => setConnected(false));
-    s.on('connect_error', (e) => setError(e.message === 'xhr poll error' ? 'Sunucuya ulaşılamıyor' : e.message));
+    s.on('connect_error', (e) => {
+      if (e.message === 'Oturum geçersiz' || e.message === 'Oturum gerekli' || e.message === 'Hesap bulunamadı') {
+        s.close(); // yeniden denemeyi bırak
+        setAuthFailed(true);
+        return;
+      }
+      setError(e.message === 'xhr poll error' ? 'Sunucuya ulaşılamıyor' : e.message);
+    });
     s.on('me', (m: MeView) => setMe(m));
     s.on('match:snapshot', (v: MatchView) => {
       setView(v);
@@ -83,13 +70,16 @@ export function useGame(name: string | null): Game {
       setViewAt(performance.now());
     });
     s.on('error:msg', (e: { message: string }) => setError(e.message));
+    s.on('xp:result', (r: XpResultMsg) => setXpResult(r));
     return () => {
       s.close();
       sockRef.current = null;
       setSocket(null);
       setConnected(false);
+      setMe(null);
+      setView(null);
     };
-  }, [name]);
+  }, [token]);
 
   const emit = useCallback((event: string, payload: unknown = {}) => {
     sockRef.current?.emit(event, payload);
@@ -112,5 +102,10 @@ export function useGame(name: string | null): Game {
     decide: (cont) => emit('round:decision', { continue: cont }),
     leaveMatch: () => emit('match:leave'),
     rescue: () => emit('rescue'),
+    setFlag: (uid, field, value) => emit('taso:flag', { uid, field, value }),
+    uploadXp: (targetUid, sourceUids) => emit('taso:xp', { targetUid, sourceUids }),
+    xpResult,
+    clearXpResult: () => setXpResult(null),
+    authFailed,
   };
 }

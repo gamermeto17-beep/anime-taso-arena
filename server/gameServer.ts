@@ -22,7 +22,18 @@ import type {
   ShotBegin,
   ShotResultMsg,
 } from '../src/net/protocol';
+import { CATALOG_BY_ID } from '../src/data/catalog';
+import { addXp, tileXpValue, XP } from '../src/engine/xp';
 import { createStarterInventory } from '../src/lib/inventory';
+import {
+  RateLimiter,
+  hashPassword,
+  hashToken,
+  newSessionToken,
+  validateCredentials,
+  verifyPassword,
+} from './auth';
+import type { Store } from './store';
 import { applyRoundTransfer } from '../src/lib/transfer';
 import type { OwnedTaso, RoomId, ShotGrade } from '../src/types';
 
@@ -42,6 +53,10 @@ export interface ServerConfig {
   graceMs: number;
   /** Bu süre içinde ücretsiz kurtarma tekrar alınamaz */
   rescueCooldownMs: number;
+  /** Oturum geçerlilik süresi */
+  sessionTtlMs: number;
+  /** Kimlik doğrulama uç noktaları için pencere başına izin verilen deneme (IP başına) */
+  authRateMax: number;
   clientOrigin?: string;
   staticDir?: string;
 }
@@ -55,14 +70,16 @@ export const DEFAULT_CONFIG: ServerConfig = {
   stakeMs: 60000,
   graceMs: 60000,
   rescueCooldownMs: 24 * 3600 * 1000,
+  sessionTtlMs: 30 * 24 * 3600 * 1000,
+  authRateMax: 40,
   clientOrigin: process.env.CLIENT_ORIGIN,
   staticDir: path.resolve(process.cwd(), 'dist'),
 };
 
 interface Player {
-  token: string;
+  id: string;
   name: string;
-  /** Aşama 2: bellekte. Aşama 3'te PostgreSQL. */
+  /** Çevrim içi oyuncunun çalışma kopyası; kalıcı kayıt PostgreSQL'dedir (sıralı yazma kuyruğu). */
   inventory: OwnedTaso[];
   shooterUid: string;
   matchId: string | null;
@@ -82,7 +99,7 @@ interface ActiveShot {
 interface Match {
   id: string;
   roomId: RoomId;
-  tokens: [string, string];
+  ids: [string, string];
   names: [string, string];
   phase: OnlinePhase;
   round: number;
@@ -108,16 +125,7 @@ const emptySummary = (): MatchSummary => ({
   perfects: [0, 0],
 });
 
-function cleanName(raw: unknown): string {
-  const s = typeof raw === 'string' ? raw.replace(/[\u0000-\u001f\u007f<>]/g, '').trim().slice(0, 16) : '';
-  return s.length >= 2 ? s : `Oyuncu${Math.floor(1000 + Math.random() * 9000)}`;
-}
-
-function validToken(t: unknown): t is string {
-  return typeof t === 'string' && /^[A-Za-z0-9-]{16,64}$/.test(t);
-}
-
-export function createGameServer(partial: Partial<ServerConfig> = {}) {
+export function createGameServer(store: Store, partial: Partial<ServerConfig> = {}) {
   const cfg: ServerConfig = { ...DEFAULT_CONFIG, ...partial };
   const app = express();
   const http = createServer(app);
@@ -132,14 +140,110 @@ export function createGameServer(partial: Partial<ServerConfig> = {}) {
   const queues: Record<RoomId, string[]> = { acemi: [], usta: [], efsane: [] };
   let shotCounter = 0;
 
+  app.set('trust proxy', 1);
+  app.disable('x-powered-by');
+  app.use(express.json({ limit: '2kb' }));
+  if (cfg.clientOrigin) {
+    app.use('/api', (req, res, next) => {
+      res.setHeader('Access-Control-Allow-Origin', cfg.clientOrigin!);
+      res.setHeader('Access-Control-Allow-Headers', 'content-type, authorization');
+      if (req.method === 'OPTIONS') return void res.sendStatus(204);
+      next();
+    });
+  }
+
   app.get('/health', (_req, res) => {
     res.json({ ok: true, players: players.size, matches: matches.size });
   });
+
+  // ---------- hesap uç noktaları ----------
+  const authLimiter = new RateLimiter(cfg.authRateMax, 10 * 60 * 1000);
+  const loginFails = new RateLimiter(10, 10 * 60 * 1000);
+  const bearer = (h: string | undefined) => (h?.startsWith('Bearer ') ? h.slice(7).trim() : '');
+
+  async function issueSession(userId: string): Promise<string> {
+    const token = newSessionToken();
+    await store.createSession(userId, hashToken(token), cfg.sessionTtlMs);
+    return token;
+  }
+
+  app.post('/api/register', async (req, res) => {
+    try {
+      if (!authLimiter.take(`ip:${req.ip}`)) return void res.status(429).json({ error: 'Çok fazla deneme, biraz bekle' });
+      const { username, password } = (req.body ?? {}) as { username?: unknown; password?: unknown };
+      const bad = validateCredentials(username, password);
+      if (bad) return void res.status(400).json({ error: bad });
+      const name = (username as string).trim();
+      if (await store.findUserByName(name)) return void res.status(409).json({ error: 'Bu kullanıcı adı alınmış' });
+      const starter = createStarterInventory(defaultRng, randomUUID().slice(0, 8));
+      const id = randomUUID();
+      const ok = await store.createUser({
+        id,
+        username: name,
+        passwordHash: await hashPassword(password as string),
+        starter,
+        shooterUid: starter[0].uid,
+      });
+      if (!ok) return void res.status(409).json({ error: 'Bu kullanıcı adı alınmış' });
+      res.status(201).json({ token: await issueSession(id), username: name });
+    } catch (e) {
+      console.error('[register]', e);
+      res.status(500).json({ error: 'Sunucu hatası, tekrar dene' });
+    }
+  });
+
+  app.post('/api/login', async (req, res) => {
+    try {
+      if (!authLimiter.take(`ip:${req.ip}`)) return void res.status(429).json({ error: 'Çok fazla deneme, biraz bekle' });
+      const { username, password } = (req.body ?? {}) as { username?: unknown; password?: unknown };
+      if (typeof username !== 'string' || typeof password !== 'string' || password.length > 200) {
+        return void res.status(400).json({ error: 'Kullanıcı adı ve parola gerekli' });
+      }
+      const key = `u:${username.toLowerCase()}`;
+      if (!loginFails.take(key)) return void res.status(429).json({ error: 'Bu hesap için çok fazla deneme, biraz bekle' });
+      const row = await store.findUserByName(username.trim());
+      const ok = await verifyPassword(password, row?.password_hash ?? null);
+      if (!row || !ok) return void res.status(401).json({ error: 'Kullanıcı adı veya parola hatalı' });
+      res.json({ token: await issueSession(row.id), username: row.username });
+    } catch (e) {
+      console.error('[login]', e);
+      res.status(500).json({ error: 'Sunucu hatası, tekrar dene' });
+    }
+  });
+
+  app.get('/api/session', async (req, res) => {
+    try {
+      const token = bearer(req.headers.authorization);
+      const uid = token ? await store.userIdForSession(hashToken(token)) : null;
+      const u = uid ? await store.getUser(uid) : null;
+      if (!u) return void res.status(401).json({ error: 'Oturum geçersiz' });
+      res.json({ username: u.username });
+    } catch (e) {
+      console.error('[session]', e);
+      res.status(500).json({ error: 'Sunucu hatası' });
+    }
+  });
+
+  app.post('/api/logout', async (req, res) => {
+    try {
+      const token = bearer(req.headers.authorization);
+      if (token) await store.deleteSession(hashToken(token));
+      res.json({ ok: true });
+    } catch (e) {
+      console.error('[logout]', e);
+      res.status(500).json({ error: 'Sunucu hatası' });
+    }
+  });
+  app.use('/api', (_req, res) => void res.status(404).json({ error: 'Bulunamadı' }));
+  app.use(((err, _req, res, _next) => {
+    void _next;
+    res.status(err?.status === 400 || err?.type === 'entity.parse.failed' ? 400 : 500).json({ error: 'Geçersiz istek' });
+  }) as express.ErrorRequestHandler);
   if (cfg.staticDir && existsSync(path.join(cfg.staticDir, 'index.html'))) {
     app.use(express.static(cfg.staticDir));
     // SPA yedeği (Express 5'te '*' deseni geçersiz olduğu için ara katman olarak)
     app.use((req, res, next) => {
-      if (req.method !== 'GET' || req.path.startsWith('/socket.io')) return next();
+      if (req.method !== 'GET' || req.path.startsWith('/socket.io') || req.path.startsWith('/api')) return next();
       res.sendFile(path.join(cfg.staticDir!, 'index.html'));
     });
   }
@@ -158,12 +262,12 @@ export function createGameServer(partial: Partial<ServerConfig> = {}) {
       canRescue: p.inventory.length < 4 && Date.now() - p.rescuedAt > cfg.rescueCooldownMs,
     };
   }
-  const sendMe = (p: Player) => emitTo(p.token, 'me', meView(p));
+  const sendMe = (p: Player) => emitTo(p.id, 'me', meView(p));
 
   function viewFor(m: Match, idx: 0 | 1): MatchView {
     const now = Date.now();
     const shot = m.shot && !m.shot.resolved ? m.shot : null;
-    const opp = players.get(m.tokens[idx === 0 ? 1 : 0]);
+    const opp = players.get(m.ids[idx === 0 ? 1 : 0]);
     return {
       matchId: m.id,
       roomId: m.roomId,
@@ -203,8 +307,8 @@ export function createGameServer(partial: Partial<ServerConfig> = {}) {
     };
   }
   function sendSnapshot(m: Match) {
-    emitTo(m.tokens[0], 'match:snapshot', viewFor(m, 0));
-    emitTo(m.tokens[1], 'match:snapshot', viewFor(m, 1));
+    emitTo(m.ids[0], 'match:snapshot', viewFor(m, 0));
+    emitTo(m.ids[1], 'match:snapshot', viewFor(m, 1));
   }
   function later(m: Match, fn: () => void, ms: number) {
     const t = setTimeout(() => {
@@ -217,33 +321,72 @@ export function createGameServer(partial: Partial<ServerConfig> = {}) {
     m.timers.forEach(clearTimeout);
     m.timers.clear();
   }
-  const idxOf = (m: Match, token: string): 0 | 1 | -1 => (m.tokens[0] === token ? 0 : m.tokens[1] === token ? 1 : -1);
+  const idxOf = (m: Match, token: string): 0 | 1 | -1 => (m.ids[0] === token ? 0 : m.ids[1] === token ? 1 : -1);
 
-  function getPlayer(token: string, name: string): Player {
-    let p = players.get(token);
-    if (!p) {
-      const inventory = createStarterInventory(defaultRng, `u${players.size}`);
-      p = {
-        token,
-        name,
-        inventory,
-        shooterUid: inventory[0].uid,
-        matchId: null,
-        queued: null,
-        rescuedAt: 0,
-        sockets: new Set(),
-      };
-      players.set(token, p);
-    } else {
-      p.name = name;
-    }
-    return p;
+  // ---------- kalıcılık: tek sıralı yazma kuyruğu ----------
+  // Oyun içi durum bellekte yürür; her değişiklik SIRAYLA veritabanına yazılır.
+  // Bir yazma başarısız olursa etkilenen oyuncuların envanteri veritabanından yeniden yüklenir.
+  let chain: Promise<unknown> = Promise.resolve();
+  function persist<T>(label: string, fn: () => Promise<T>, affected: string[] = []): Promise<T | undefined> {
+    const run = chain.then(fn).catch(async (e) => {
+      console.error(`[db] ${label} başarısız:`, e);
+      for (const id of affected) await resync(id).catch(() => undefined);
+      return undefined;
+    });
+    chain = run;
+    return run as Promise<T | undefined>;
   }
+  const flush = async () => {
+    await chain;
+  };
+  async function resync(id: string) {
+    const p = players.get(id);
+    if (!p) return;
+    p.inventory = await store.loadInventory(id);
+    if (!p.inventory.some((t) => t.uid === p.shooterUid) && p.inventory[0]) p.shooterUid = p.inventory[0].uid;
+    sendMe(p);
+  }
+
+  const loading = new Map<string, Promise<Player | null>>();
+  function loadPlayer(userId: string): Promise<Player | null> {
+    const existing = players.get(userId);
+    if (existing) return Promise.resolve(existing);
+    let l = loading.get(userId);
+    if (!l) {
+      l = (async () => {
+        await flush(); // bekleyen yazmalar bitmeden okuma yapma
+        const u = await store.getUser(userId);
+        if (!u) return null;
+        const inventory = await store.loadInventory(userId);
+        const p: Player = {
+          id: userId,
+          name: u.username,
+          inventory,
+          shooterUid: inventory.some((t) => t.uid === u.shooter_uid) ? u.shooter_uid! : (inventory[0]?.uid ?? ''),
+          matchId: null,
+          queued: null,
+          rescuedAt: u.rescued_at ? new Date(u.rescued_at).getTime() : 0,
+          sockets: new Set(),
+        };
+        players.set(userId, p);
+        return p;
+      })().finally(() => loading.delete(userId));
+      loading.set(userId, l);
+    }
+    return l;
+  }
+  /** Bağlantısı, sırası ve maçı olmayan oyuncuyu bellekten at (veritabanı kaynak). */
+  function maybeEvict(p: Player) {
+    if (p.sockets.size === 0 && !p.matchId && !p.queued) players.delete(p.id);
+  }
+
+  /** Ortaya konabilecek taso sayısı: kilitsiz ve atış tasosu olmayanlar */
+  const stakeable = (p: Player) => p.inventory.filter((t) => !t.locked && t.uid !== p.shooterUid).length;
 
   // ---------- eşleşme ----------
   function leaveQueue(p: Player) {
     if (p.queued) {
-      queues[p.queued] = queues[p.queued].filter((t) => t !== p.token);
+      queues[p.queued] = queues[p.queued].filter((t) => t !== p.id);
       p.queued = null;
     }
   }
@@ -252,13 +395,13 @@ export function createGameServer(partial: Partial<ServerConfig> = {}) {
     while (q.length >= 2) {
       const a = players.get(q.shift()!);
       const b = players.get(q.shift()!);
-      if (!a || !b || a.token === b.token) continue;
+      if (!a || !b || a.id === b.id) continue;
       const alive = [a, b].filter((p) => p.sockets.size > 0);
       if (alive.length < 2) {
         // kopmuş olanı at, bağlı olanı sıraya geri koy
         for (const p of [a, b]) {
           if (p.sockets.size === 0) p.queued = null;
-          else q.unshift(p.token);
+          else q.unshift(p.id);
         }
         continue;
       }
@@ -271,7 +414,7 @@ export function createGameServer(partial: Partial<ServerConfig> = {}) {
     const m: Match = {
       id: randomUUID(),
       roomId,
-      tokens: [a.token, b.token],
+      ids: [a.id, b.id],
       names: [a.name, b.name],
       phase: 'stakes',
       round: 1,
@@ -298,7 +441,7 @@ export function createGameServer(partial: Partial<ServerConfig> = {}) {
 
   // ---------- tur akışı ----------
   function startRound(m: Match) {
-    const [pa, pb] = [players.get(m.tokens[0])!, players.get(m.tokens[1])!];
+    const [pa, pb] = [players.get(m.ids[0])!, players.get(m.ids[1])!];
     const mk = (p: Player, stakes: StakeTile[]): PlayerSetup => {
       const sh = p.inventory.find((t) => t.uid === p.shooterUid)!;
       return { name: p.name, stakes, shooterUid: sh.uid, shooterLevel: sh.level };
@@ -328,8 +471,8 @@ export function createGameServer(partial: Partial<ServerConfig> = {}) {
     };
     const base = { shotId: m.shot.id, shooter, elapsedMs: 0 };
     const forShooter: ShotBegin = { ...base, center: m.shot.center };
-    emitTo(m.tokens[shooter], 'shot:begin', forShooter);
-    emitTo(m.tokens[shooter === 0 ? 1 : 0], 'shot:begin', base satisfies ShotBegin);
+    emitTo(m.ids[shooter], 'shot:begin', forShooter);
+    emitTo(m.ids[shooter === 0 ? 1 : 0], 'shot:begin', base satisfies ShotBegin);
     const id = m.shot.id;
     later(m, () => {
       if (m.shot && m.shot.id === id && !m.shot.resolved) applyShot(m, 'weak', 0);
@@ -364,8 +507,8 @@ export function createGameServer(partial: Partial<ServerConfig> = {}) {
       rolls: res.rolls,
       state: res.state,
     };
-    emitTo(m.tokens[0], 'shot:result', msg);
-    emitTo(m.tokens[1], 'shot:result', msg);
+    emitTo(m.ids[0], 'shot:result', msg);
+    emitTo(m.ids[1], 'shot:result', msg);
     if (res.state.phase === 'roundOver') later(m, () => finishRound(m), cfg.animMs);
     else later(m, () => beginShot(m), cfg.animMs);
   }
@@ -382,15 +525,23 @@ export function createGameServer(partial: Partial<ServerConfig> = {}) {
 
   /**
    * Tasoların el değiştirmesi: tek, eşzamanlı (await içermeyen) adım.
-   * Node tek iş parçacıklı çalıştığı için bu blok bölünemez; Aşama 3'te
-   * aynı mantık tek bir PostgreSQL işlemine (transaction) dönüşecek.
+   * Bellekteki değişiklik bölünemez; veritabanı tarafı tek bir PostgreSQL işlemidir
+   * (taso satırının tek sahibi vardır, koşullu UPDATE çift işlemeyi engeller).
    */
   function settleTransfer(m: Match) {
     if (!m.state) return;
-    const [pa, pb] = [players.get(m.tokens[0])!, players.get(m.tokens[1])!];
-    const [ia, ib] = applyRoundTransfer(pa.inventory, pb.inventory, m.state);
-    pa.inventory = ia;
-    pb.inventory = ib;
+    const [pa, pb] = [players.get(m.ids[0])!, players.get(m.ids[1])!];
+    const [ia0, ib0] = applyRoundTransfer(pa.inventory, pb.inventory, m.state);
+    const hadA = new Set(pa.inventory.map((t) => t.uid));
+    const hadB = new Set(pb.inventory.map((t) => t.uid));
+    const moves = [
+      ...ib0.filter((t) => hadA.has(t.uid)).map((t) => ({ uid: t.uid, from: pa.id, to: pb.id })),
+      ...ia0.filter((t) => hadB.has(t.uid)).map((t) => ({ uid: t.uid, from: pb.id, to: pa.id })),
+    ];
+    const reset = (t: OwnedTaso, had: Set<string>): OwnedTaso => (had.has(t.uid) ? t : { ...t, favorite: false, locked: false });
+    pa.inventory = ia0.map((t) => reset(t, hadA));
+    pb.inventory = ib0.map((t) => reset(t, hadB));
+    if (moves.length) void persist('transfer', () => store.moveTasos(moves), [pa.id, pb.id]);
     addToSummary(m, m.state);
     m.summary.rounds += 1;
     m.state = null; // aynı tur iki kez işlenemez
@@ -407,19 +558,19 @@ export function createGameServer(partial: Partial<ServerConfig> = {}) {
     m.decisionDeadline = Date.now() + cfg.decisionMs;
     clearTimers(m);
     later(m, () => resolveDecision(m, true), cfg.decisionMs);
-    m.tokens.forEach((t) => sendMe(players.get(t)!));
+    m.ids.forEach((t) => sendMe(players.get(t)!));
     sendSnapshot(m);
   }
 
   function resolveDecision(m: Match, timedOut: boolean) {
     if (m.phase !== 'decision') return;
-    const need = ROOM_BY_ID[m.roomId].stakeCount + 1;
-    const pa = players.get(m.tokens[0])!;
-    const pb = players.get(m.tokens[1])!;
+    const need = ROOM_BY_ID[m.roomId].stakeCount;
+    const pa = players.get(m.ids[0])!;
+    const pb = players.get(m.ids[1])!;
     const wants = m.decision[0] === true && m.decision[1] === true;
     if (!wants) return void endMatch(m, 'finished');
     if (timedOut && (m.decision[0] === null || m.decision[1] === null)) return void endMatch(m, 'finished');
-    if (pa.inventory.length < need || pb.inventory.length < need) return void endMatch(m, 'noTiles');
+    if (stakeable(pa) < need || stakeable(pb) < need) return void endMatch(m, 'noTiles');
     // yeni tur: taso seçimi
     clearTimers(m);
     m.round += 1;
@@ -442,11 +593,12 @@ export function createGameServer(partial: Partial<ServerConfig> = {}) {
     m.endReason = reason;
     m.shot = null;
     m.state = null;
-    for (const t of m.tokens) {
+    for (const t of m.ids) {
       const p = players.get(t);
       if (p) {
         p.matchId = null;
         sendMe(p);
+        maybeEvict(p);
       }
     }
     sendSnapshot(m);
@@ -454,17 +606,26 @@ export function createGameServer(partial: Partial<ServerConfig> = {}) {
   }
 
   // ---------- socket olayları ----------
-  io.use((socket, next) => {
-    const { token, name } = socket.handshake.auth as { token?: unknown; name?: unknown };
-    if (!validToken(token)) return next(new Error('Geçersiz oturum'));
-    socket.data.token = token;
-    socket.data.name = cleanName(name);
-    next();
+  io.use(async (socket, next) => {
+    try {
+      const { token } = socket.handshake.auth as { token?: unknown };
+      if (typeof token !== 'string' || token.length < 20 || token.length > 100) return next(new Error('Oturum gerekli'));
+      const userId = await store.userIdForSession(hashToken(token));
+      if (!userId) return next(new Error('Oturum geçersiz'));
+      const p = await loadPlayer(userId);
+      if (!p) return next(new Error('Hesap bulunamadı'));
+      socket.data.userId = userId;
+      next();
+    } catch (e) {
+      console.error('[socket auth]', e);
+      next(new Error('Sunucu hatası'));
+    }
   });
 
   io.on('connection', (socket: Socket) => {
-    const token = socket.data.token as string;
-    const p = getPlayer(token, socket.data.name as string);
+    const token = socket.data.userId as string;
+    const p = players.get(token);
+    if (!p) return void socket.disconnect(true);
     p.sockets.add(socket.id);
     socket.join(room(token));
 
@@ -486,11 +647,11 @@ export function createGameServer(partial: Partial<ServerConfig> = {}) {
       const roomId = payload?.roomId;
       if (!roomId || !(roomId in ROOM_BY_ID)) return fail('Geçersiz oda');
       if (p.matchId) return fail('Zaten bir maçtasın');
-      const need = ROOM_BY_ID[roomId].stakeCount + 1;
-      if (p.inventory.length < need) return fail(`Bu oda için en az ${need} tasoya ihtiyacın var`);
+      const need = ROOM_BY_ID[roomId].stakeCount;
+      if (stakeable(p) < need) return fail(`Bu oda için atış tasosu dışında ${need} kilitsiz tasoya ihtiyacın var`);
       leaveQueue(p);
       p.queued = roomId;
-      queues[roomId].push(p.token);
+      queues[roomId].push(p.id);
       sendMe(p);
       tryMatch(roomId);
     });
@@ -504,6 +665,7 @@ export function createGameServer(partial: Partial<ServerConfig> = {}) {
       if (p.matchId) return fail('Maç sırasında atış tasosu değiştirilemez');
       if (!payload?.uid || !p.inventory.some((t) => t.uid === payload.uid)) return fail('Bu taso sende yok');
       p.shooterUid = payload.uid;
+      void persist('shooter', () => store.setShooter(p.id, payload.uid!), [p.id]);
       sendMe(p);
     });
 
@@ -511,8 +673,19 @@ export function createGameServer(partial: Partial<ServerConfig> = {}) {
       if (p.inventory.length >= 4) return fail('Kurtarma yalnızca tasosu azalanlar içindir');
       if (Date.now() - p.rescuedAt <= cfg.rescueCooldownMs) return fail('Bugünkü kurtarma hakkını kullandın');
       p.rescuedAt = Date.now();
-      p.inventory = [...p.inventory, ...createStarterInventory(defaultRng, `r${Date.now()}`).slice(0, 12)];
-      if (!p.inventory.some((t) => t.uid === p.shooterUid)) p.shooterUid = p.inventory[0].uid;
+      const gift = createStarterInventory(defaultRng, randomUUID().slice(0, 8)).slice(0, 12);
+      p.inventory = [...p.inventory, ...gift];
+      const needShooter = !p.inventory.some((t) => t.uid === p.shooterUid);
+      if (needShooter) p.shooterUid = p.inventory[0].uid;
+      void persist(
+        'rescue',
+        async () => {
+          await store.addTasos(p.id, gift);
+          await store.setRescuedAt(p.id);
+          if (needShooter) await store.setShooter(p.id, p.shooterUid);
+        },
+        [p.id],
+      );
       sendMe(p);
     });
 
@@ -531,6 +704,7 @@ export function createGameServer(partial: Partial<ServerConfig> = {}) {
         const t = p.inventory.find((x) => x.uid === u);
         if (!t) return fail('Seçtiğin taso sende yok');
         if (t.uid === p.shooterUid) return fail('Atış tasosu ortaya konamaz');
+        if (t.locked) return fail('Kilitli taso ortaya konamaz');
         chosen.push({ uid: t.uid, catalogId: t.catalogId });
       }
       m.stakes[i as 0 | 1] = chosen; // onaylanan tasolar kilitlenir (envanterden ayrı sayılır)
@@ -556,6 +730,70 @@ export function createGameServer(partial: Partial<ServerConfig> = {}) {
       else sendSnapshot(m);
     });
 
+    socket.on('taso:flag', (payload: { uid?: unknown; field?: unknown; value?: unknown }) => {
+      const { uid, field, value } = payload ?? {};
+      if (typeof uid !== 'string' || typeof value !== 'boolean' || (field !== 'favorite' && field !== 'locked')) return;
+      const i = p.inventory.findIndex((t) => t.uid === uid);
+      if (i < 0) return fail('Bu taso sende yok');
+      if (p.matchId) return fail('Maç sırasında taso ayarı değiştirilemez');
+      p.inventory = p.inventory.map((t, k) => (k === i ? { ...t, [field]: value } : t));
+      void persist('flag', () => store.setFlag(p.id, uid, field, value), [p.id]);
+      sendMe(p);
+    });
+
+    socket.on('taso:xp', async (payload: { targetUid?: unknown; sourceUids?: unknown }) => {
+      const { targetUid, sourceUids } = payload ?? {};
+      if (p.matchId) return fail('Maç sırasında XP yüklenemez');
+      if (typeof targetUid !== 'string' || !Array.isArray(sourceUids)) return fail('Geçersiz istek');
+      if (sourceUids.length < 1 || sourceUids.length > 200 || sourceUids.some((u) => typeof u !== 'string')) {
+        return fail('1-200 taso seçmelisin');
+      }
+      const srcIds = [...new Set(sourceUids as string[])];
+      if (srcIds.length !== sourceUids.length) return fail('Aynı taso iki kez seçilemez');
+      if (srcIds.includes(targetUid)) return fail('Taso kendi kendine XP olamaz');
+      const target = p.inventory.find((t) => t.uid === targetUid);
+      if (!target) return fail('Hedef taso sende yok');
+      if (target.level >= XP.maxLevel) return fail('Bu taso zaten maksimum seviyede');
+      const sources = srcIds.map((u) => p.inventory.find((t) => t.uid === u));
+      if (sources.some((t) => !t)) return fail('Seçtiğin taso sende yok');
+      for (const t of sources as OwnedTaso[]) {
+        if (t.locked) return fail('Kilitli taso XP\'ye dönüştürülemez');
+        if (t.favorite) return fail('Favori taso XP\'ye dönüştürülemez (önce favoriden çıkar)');
+        if (t.uid === p.shooterUid) return fail('Atış tasosu XP\'ye dönüştürülemez');
+      }
+      const gain = (sources as OwnedTaso[]).reduce((sum, t) => {
+        const rarity = CATALOG_BY_ID[t.catalogId]?.rarity ?? 'common';
+        return sum + tileXpValue(rarity, t.level, t.xp);
+      }, 0);
+      const r = addXp(target.level, target.xp, gain);
+      // Bellekte hemen uygula (aynı tasoyu ikinci kez harcamayı engeller), sonra veritabanını bekle
+      const gone = new Set(srcIds);
+      p.inventory = p.inventory
+        .filter((t) => !gone.has(t.uid))
+        .map((t) => (t.uid === targetUid ? { ...t, level: r.level, xp: r.xp } : t));
+      const ok = await persist(
+        'xp',
+        () => store.consumeXp({ userId: p.id, targetUid, sourceUids: srcIds, level: r.level, xp: r.xp }),
+        [p.id],
+      );
+      if (!ok) {
+        await resync(p.id);
+        return fail('XP yüklenemedi, tekrar dene');
+      }
+      socket.emit('xp:result', {
+        targetUid,
+        consumed: srcIds.length,
+        gained: gain,
+        wasted: r.wasted,
+        levelBefore: target.level,
+        levelAfter: r.level,
+        levelsGained: r.levelsGained,
+        crossed: r.crossed,
+        xp: r.xp,
+      });
+      sendMe(p);
+    });
+
     socket.on('match:leave', () => {
       const m = myMatch();
       if (!m || m.phase === 'ended') return;
@@ -567,7 +805,7 @@ export function createGameServer(partial: Partial<ServerConfig> = {}) {
       if (p.sockets.size > 0) return;
       leaveQueue(p);
       const m = myMatch();
-      if (!m || m.phase === 'ended') return;
+      if (!m || m.phase === 'ended') return void maybeEvict(p);
       const i = idxOf(m, token) as 0 | 1;
       sendSnapshot(m); // rakibe "bağlantı koptu" bilgisi
       m.grace[i] = setTimeout(() => endMatch(m, 'abandoned'), cfg.graceMs);
@@ -581,6 +819,9 @@ export function createGameServer(partial: Partial<ServerConfig> = {}) {
     config: cfg,
     players,
     matches,
+    store,
+    /** Bekleyen tüm veritabanı yazmalarının bitmesini bekler (test/kapanış için). */
+    flush,
     start(): Promise<number> {
       return new Promise((resolve) => {
         http.listen(cfg.port, () => {
@@ -592,6 +833,7 @@ export function createGameServer(partial: Partial<ServerConfig> = {}) {
     async stop() {
       matches.forEach(clearTimers);
       await io.close();
+      await flush();
     },
   };
 }

@@ -47,5 +47,9 @@ export const sfx = {
     [660, 880, 1100, 1320].forEach((f, i) => tone(f, 0.18, 'triangle', 0.12, i * 0.07));
   },
   miss: () => tone(220, 0.25, 'sine', 0.1, 0, 120),
+  levelUp: (milestone = false) => {
+    [523, 659, 784, 1047].forEach((f, i) => tone(f, 0.2, 'triangle', 0.12, i * 0.09));
+    if (milestone) [784, 988, 1175, 1568, 2093].forEach((f, i) => tone(f, 0.35, 'triangle', 0.12, 0.4 + i * 0.1));
+  },
   win: () => [523, 659, 784, 1047].forEach((f, i) => tone(f, 0.25, 'triangle', 0.12, i * 0.12)),
 };

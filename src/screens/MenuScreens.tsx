@@ -7,45 +7,19 @@ import { useCountdown } from '../lib/useCountdown';
 import type { MatchSummary, MatchView, MeView } from '../net/protocol';
 import type { OwnedTaso, RoomConfig, RoomId } from '../types';
 
-export function LoginScreen({ onSubmit, initial }: { onSubmit: (name: string) => void; initial: string }) {
-  const [name, setName] = useState(initial);
-  const ok = name.trim().length >= 2;
-  return (
-    <form
-      className="mx-auto flex h-full max-w-sm flex-col items-center justify-center gap-5 p-6 text-center"
-      onSubmit={(e) => {
-        e.preventDefault();
-        if (ok) onSubmit(name.trim().slice(0, 16));
-      }}
-    >
-      <h1 className="text-5xl font-black leading-none">
-        ANIME
-        <br />
-        TASO ARENA
-      </h1>
-      <div className="w-full text-left">
-        <label className="text-xs font-bold uppercase tracking-widest text-amber-300">Oyuncu adı</label>
-        <input
-          autoFocus
-          maxLength={16}
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          placeholder="Takma adın"
-          className="mt-1 w-full rounded-xl bg-white/10 px-4 py-3 text-lg font-bold outline-none ring-amber-300 focus:ring-2"
-        />
-      </div>
-      <button className="btn btn-primary w-full" disabled={!ok} type="submit">
-        GİRİŞ YAP
-      </button>
-      <p className="text-xs text-slate-400">
-        Misafir hesabı: bu cihazdaki gizli oturum anahtarı seni tanır. Kalıcı hesap ve veritabanı Aşama 3'te gelecek;
-        şu an koleksiyonun sunucu yeniden başlayana kadar saklanır.
-      </p>
-    </form>
-  );
-}
-
-export function MenuScreen({ me, onPlay, onRescue }: { me: MeView; onPlay: () => void; onRescue: () => void }) {
+export function MenuScreen({
+  me,
+  onPlay,
+  onRescue,
+  onCollection,
+  onProfile,
+}: {
+  me: MeView;
+  onPlay: () => void;
+  onRescue: () => void;
+  onCollection: () => void;
+  onProfile: () => void;
+}) {
   const unique = (sid: string) =>
     new Set(me.inventory.filter((t) => CATALOG_BY_ID[t.catalogId].seriesId === sid).map((t) => t.catalogId)).size;
   return (
@@ -78,10 +52,16 @@ export function MenuScreen({ me, onPlay, onRescue }: { me: MeView; onPlay: () =>
         <div className="text-center text-xs text-slate-400">Toplam {me.inventory.length} tasoya sahipsin</div>
       </div>
       <div className="grid w-full max-w-xs grid-cols-2 gap-2 text-sm">
-        {['Koleksiyon', 'Çark / Paket', 'Günlük Görevler', 'Profil'].map((l) => (
-          <button key={l} className="btn btn-ghost py-2 text-sm" disabled title="Sonraki aşamalarda">
+        <button className="btn btn-ghost py-2 text-sm" onClick={onCollection}>
+          Koleksiyon
+        </button>
+        <button className="btn btn-ghost py-2 text-sm" onClick={onProfile}>
+          Profil
+        </button>
+        {['Çark / Paket', 'Günlük Görevler'].map((l) => (
+          <button key={l} className="btn btn-ghost py-2 text-sm" disabled title="Sonraki aşamada">
             {l}
-            <div className="text-[10px] font-normal opacity-70">Aşama 3-4</div>
+            <div className="text-[10px] font-normal opacity-70">Aşama 4</div>
           </button>
         ))}
       </div>
@@ -133,7 +113,7 @@ export function RoomSelectScreen({
 
       <div className="grid gap-4">
         {ROOMS.map((r) => {
-          const can = me.inventory.length >= r.stakeCount + 1;
+          const can = me.inventory.filter((t) => !t.locked && t.uid !== me.shooterUid).length >= r.stakeCount;
           return (
             <button
               key={r.id}
@@ -144,7 +124,7 @@ export function RoomSelectScreen({
               <div className="text-2xl font-black">{r.name}</div>
               <div className="mt-1 text-white/90">{r.description}</div>
               <div className="mt-3 text-xs font-bold uppercase tracking-widest text-white/80">
-                {can ? `Zamanlama barı: ${r.barPeriodMs < 1300 ? 'çok hızlı' : r.barPeriodMs < 1700 ? 'hızlı' : 'normal'}` : `En az ${r.stakeCount + 1} taso gerekli`}
+                {can ? `Zamanlama barı: ${r.barPeriodMs < 1300 ? 'çok hızlı' : r.barPeriodMs < 1700 ? 'hızlı' : 'normal'}` : `Atış tasosu dışında ${r.stakeCount} kilitsiz taso gerekli`}
               </div>
             </button>
           );
@@ -193,7 +173,7 @@ export function StakePickScreen({
   const oppName = view.names[view.you === 0 ? 1 : 0];
   const shooter = inventory.find((t) => t.uid === shooterUid);
   const sorted = useMemo(
-    () => inventory.filter((t) => t.uid !== shooterUid).slice().sort((a, b) => a.catalogId.localeCompare(b.catalogId)),
+    () => inventory.filter((t) => t.uid !== shooterUid && !t.locked).slice().sort((a, b) => a.catalogId.localeCompare(b.catalogId)),
     [inventory, shooterUid],
   );
   const toggle = (uid: string) =>

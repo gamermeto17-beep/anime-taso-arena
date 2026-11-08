@@ -230,3 +230,32 @@ body,
   from { transform: scale(0.85); opacity: 0; }
   to { transform: scale(1); opacity: 1; }
 }
+
+/* ---- Seviye atlama ---- */
+.levelup-pop {
+  animation: levelup-pop 0.9s cubic-bezier(0.2, 1.4, 0.4, 1) both;
+  filter: drop-shadow(0 0 24px rgba(251, 191, 36, 0.8));
+}
+@keyframes levelup-pop {
+  0% { transform: scale(0.4) rotate(-12deg); opacity: 0; }
+  60% { transform: scale(1.18) rotate(4deg); opacity: 1; }
+  100% { transform: scale(1) rotate(0); }
+}
+.milestone-rays {
+  position: absolute;
+  inset: -50%;
+  background: repeating-conic-gradient(from 0deg, rgba(251, 191, 36, 0.28) 0deg 8deg, transparent 8deg 24deg);
+  animation: spin-slow 14s linear infinite;
+  mask-image: radial-gradient(circle, black 10%, transparent 60%);
+  -webkit-mask-image: radial-gradient(circle, black 10%, transparent 60%);
+  pointer-events: none;
+}
+.milestone-title {
+  animation: levelup-pop 0.9s ease-out both, glow 1.4s ease-in-out infinite alternate;
+  text-shadow: 0 0 18px rgba(251, 191, 36, 0.9);
+}
+@keyframes spin-slow { to { transform: rotate(360deg); } }
+@keyframes glow { to { text-shadow: 0 0 34px rgba(251, 191, 36, 1); } }
+@media (prefers-reduced-motion: reduce) {
+  .levelup-pop, .milestone-rays, .milestone-title { animation: none; }
+}

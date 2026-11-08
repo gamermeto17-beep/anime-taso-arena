@@ -1,12 +1,26 @@
-# Render.com "Blueprint": depoyu bağlayınca her şeyi otomatik kurar (ücretsiz plan yeterli).
+# Render Blueprint: web servisi + ücretsiz PostgreSQL (bağlantı otomatik verilir).
+# UYARI: ücretsiz Postgres ~30 gün sonra sona erer; süre dolmadan ücretli plana geçilmeli.
+databases:
+  - name: anime-taso-arena-db
+    plan: free
+    region: frankfurt
+    databaseName: anime_taso_arena_db
+    user: anime_taso_arena_db_user
+    postgresMajorVersion: "16"
+
 services:
   - type: web
     name: anime-taso-arena
     runtime: node
     plan: free
+    region: frankfurt
     buildCommand: npm install --include=dev && npm run build
     startCommand: npm start
     healthCheckPath: /health
     envVars:
       - key: NODE_VERSION
         value: 20
+      - key: DATABASE_URL
+        fromDatabase:
+          name: anime-taso-arena-db
+          property: connectionString

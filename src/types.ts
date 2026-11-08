@@ -30,7 +30,11 @@ export interface OwnedTaso {
   uid: string;
   catalogId: string;
   level: number;
+  /** Mevcut seviye içindeki XP */
   xp: number;
+  favorite?: boolean;
+  /** Kilitli taso XP'ye dönüştürülemez ve maça konamaz */
+  locked?: boolean;
 }
 
 export type RoomId = 'acemi' | 'usta' | 'efsane';

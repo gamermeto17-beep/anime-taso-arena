@@ -1,4 +1,4 @@
-# ANIME TASO ARENA — Aşama 1 + 2
+# ANIME TASO ARENA — Aşama 1 + 2 + 3
 
 Klasik taso oyunundan esinlenen, anime koleksiyonlu, **gerçek çevrim içi iki oyunculu** web oyunu.
 
@@ -18,15 +18,14 @@ Klasik taso oyunundan esinlenen, anime koleksiyonlu, **gerçek çevrim içi iki 
 - 20 test (motor, transfer, sunucu entegrasyonu)
 
 **Henüz YOK**
-- Kalıcılık: hesap/envanter **sunucu belleğinde** tutulur, sunucu yeniden başlayınca sıfırlanır. Giriş "misafir": cihazdaki gizli anahtar seni tanır, şifre yok. PostgreSQL + gerçek hesaplar Aşama 3 (`prisma/schema.prisma` taslak)
-- XP/seviye ekranları, kopya taso → XP (Aşama 3)
+- Hesap güvenliği sınırları: parola sıfırlama / e-posta doğrulama yok (parolanı unutursan hesap kurtarılamaz); giriş denemeleri IP ve hesap başına sınırlıdır
 - Jeton, çark, paket, günlük görevler, maç ödülleri (Aşama 4)
-- Müzik, koleksiyon/profil ekranları, ileri animasyonlar (Aşama 5)
+- Müzik, ileri animasyonlar, performans (Aşama 5)
 - Karakter görselleri **projeye dahil değil** (telifli); aşağıdaki araçla kendi/lisanslı görsellerini ekle
 
 **Bilinen sınırlar**
 - Zamanlama barı istemcide çalışır; sunucu süreyi makul pencereye sıkıştırır ve çevirme sonucunu kendisi çizer, ama bar bilgisini bilen hileli bir istemciyi tamamen engelleyemez (kırmızı bölge ekranda görünmek zorunda). Çevirme şansı ve taso transferi güvenlidir.
-- Transferler sunucuda tek senkron adımda yapılır (Node tek iş parçacıklı); Aşama 3'te tek bir PostgreSQL işlemine dönüşecek
+- Transferler bellekte bölünemez adımda yapılır, veritabanına tek PostgreSQL işlemiyle yazılır (bir taso satırının tek sahibi vardır, çift işlenemez)
 - Birden çok sunucu kopyası çalıştırılamaz (eşleşme ve maçlar bellekte)
 
 ## Kurulum
@@ -62,7 +61,7 @@ src/net        ortak protokol tipleri, istemci bağlantı kancası
 src/screens    giriş, menü, oda, kuyruk, taso seçimi, masa, sonuç
 src/components Taso, TimingBar, Emblem
 scripts/       görsel içe aktarma / katalog CSV
-prisma/        Aşama 3 için TASLAK şema (henüz bağlı değil)
+server/         Express + Socket.IO, db.ts (pg / PGlite), store.ts (SQL), auth.ts (scrypt, oturum)
 ```
 
 ## Yayınlama (en kolay yol: Render, ücretsiz)
@@ -71,3 +70,10 @@ prisma/        Aşama 3 için TASLAK şema (henüz bağlı değil)
 3. Birkaç dakika sonra Render sana `https://anime-taso-arena-xxxx.onrender.com` gibi bir adres verir. Arkadaşına bu linki gönder; ikiniz de linke tıklayıp oynarsınız.
 
 Notlar: ücretsiz planda sunucu 15 dk işlem olmazsa uyur (ilk açılış ~30 sn sürer) ve yeniden başlayınca koleksiyonlar sıfırlanır (kalıcı veritabanı Aşama 3). Docker kullanan herhangi bir yerde `Dockerfile` da hazırdır. `PORT` ortam değişkeni otomatik okunur.
+
+
+## Aşama 3 (tamamlandı)
+- Kalıcı hesaplar: kayıt/giriş (scrypt ile parola, hash'lenmiş oturum belirteçleri, 30 gün), PostgreSQL envanteri
+- XP ve seviye (1-500, her 100 seviyede +3 puan çevirme şansı, en fazla +15), kopya tasoyu XP'ye dönüştürme (onaylı), kilit/favori, koleksiyon ve profil ekranları, seviye atlama animasyonu
+- `DATABASE_URL` varsa PostgreSQL, yoksa yerel PGlite (`./data/pglite`) kullanılır
+- **Dürüst sınırlar:** Render ÜCRETSİZ Postgres veritabanı ~30 gün sonra sona erer (süre dolmadan ücretli plana geçilmeli ya da yeni veritabanına taşınmalı, yoksa hesaplar silinir). Ücretsiz web servisi 15 dk işlem olmazsa uyur; uyurken/yeniden başlarken devam eden maçlar bellekte olduğu için kaybolur (tasolar maç sırasında sahibinde kalır, hesaplar kaybolmaz). Karakter görselleri henüz sizin sağlayacağınız dosyalardır.

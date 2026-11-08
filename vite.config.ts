@@ -8,6 +8,7 @@ export default defineConfig({
     proxy: {
       '/socket.io': { target: 'http://localhost:3001', ws: true },
       '/health': 'http://localhost:3001',
+      '/api': 'http://localhost:3001',
     },
   },
   test: {
