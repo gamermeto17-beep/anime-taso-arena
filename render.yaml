@@ -1,0 +1,12 @@
+# Render.com "Blueprint": depoyu bağlayınca her şeyi otomatik kurar (ücretsiz plan yeterli).
+services:
+  - type: web
+    name: anime-taso-arena
+    runtime: node
+    plan: free
+    buildCommand: npm install --include=dev && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: 20

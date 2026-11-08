@@ -1,0 +1,232 @@
+@import 'tailwindcss';
+
+:root {
+  color-scheme: dark;
+  --bg: #0b1020;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  background: radial-gradient(1200px 700px at 50% -10%, #1d2a5c 0%, var(--bg) 60%);
+  color: #eef2ff;
+  font-family: 'Trebuchet MS', 'Segoe UI', system-ui, sans-serif;
+  overscroll-behavior: none;
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+  touch-action: manipulation;
+}
+
+.btn {
+  @apply rounded-2xl px-6 py-3 text-lg font-extrabold tracking-wide shadow-lg transition active:scale-95;
+}
+.btn-primary {
+  @apply bg-gradient-to-b from-amber-300 to-orange-500 text-slate-900;
+}
+.btn-ghost {
+  @apply bg-white/10 text-white hover:bg-white/20;
+}
+.btn:disabled {
+  @apply cursor-not-allowed opacity-40;
+}
+
+/* ---------- Taso ---------- */
+.taso {
+  position: relative;
+  width: var(--size, 96px);
+  height: var(--size, 96px);
+  perspective: 600px;
+}
+.taso-inner {
+  position: absolute;
+  inset: 0;
+  transform-style: preserve-3d;
+  transition: transform 0.7s cubic-bezier(0.3, 0.7, 0.3, 1);
+}
+.taso[data-face='back'] .taso-inner {
+  transform: rotateY(180deg);
+}
+.taso-face {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  backface-visibility: hidden;
+  overflow: hidden;
+  box-shadow:
+    0 0 0 calc(var(--size, 96px) * 0.045) var(--rim),
+    inset 0 0 0 calc(var(--size, 96px) * 0.03) rgba(255, 255, 255, 0.35),
+    inset 0 calc(var(--size, 96px) * -0.08) calc(var(--size, 96px) * 0.12) rgba(0, 0, 0, 0.35),
+    0 calc(var(--size, 96px) * 0.06) 0 calc(var(--size, 96px) * 0.04) var(--edge),
+    0 calc(var(--size, 96px) * 0.14) calc(var(--size, 96px) * 0.16) rgba(0, 0, 0, 0.55);
+}
+.taso-front {
+  background: radial-gradient(circle at 35% 28%, var(--c1), var(--c2) 70%);
+}
+.taso-back {
+  transform: rotateY(180deg);
+}
+.taso-shine {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.45) 0%, rgba(255, 255, 255, 0) 38%);
+  pointer-events: none;
+}
+
+/* ---------- Masa ---------- */
+.arena {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  perspective: 1100px;
+}
+.arena-floor {
+  position: absolute;
+  left: 50%;
+  top: 52%;
+  width: min(94%, 920px);
+  aspect-ratio: 16 / 10;
+  transform: translate(-50%, -50%) rotateX(38deg);
+  border-radius: 28px;
+  background:
+    repeating-linear-gradient(92deg, rgba(0, 0, 0, 0.08) 0 3px, transparent 3px 22px),
+    linear-gradient(160deg, #a9743c, #7a4b22 60%, #5e3818);
+  box-shadow:
+    inset 0 0 0 6px #3b2210,
+    inset 0 0 60px rgba(0, 0, 0, 0.55),
+    0 40px 60px rgba(0, 0, 0, 0.6);
+  transform-style: preserve-3d;
+}
+.arena-tile {
+  position: absolute;
+  transform-style: preserve-3d;
+  transition:
+    left 0.65s cubic-bezier(0.15, 0.8, 0.3, 1),
+    top 0.65s cubic-bezier(0.15, 0.8, 0.3, 1),
+    transform 0.65s cubic-bezier(0.15, 0.8, 0.3, 1),
+    opacity 0.5s ease;
+}
+/* Yığın: tasolar üst üste, hafif kayık; vurunca dağılır */
+.arena-tile.piled {
+  filter: drop-shadow(0 2px 1px rgba(0, 0, 0, 0.35));
+}
+.arena-tile.flipping {
+  animation: tile-hop 0.75s ease-out forwards;
+}
+.arena-tile.collect {
+  transition:
+    left 0.7s ease-in,
+    top 0.7s ease-in,
+    transform 0.7s ease-in,
+    opacity 0.7s ease-in;
+  opacity: 0;
+}
+@keyframes tile-hop {
+  0% { transform: translate(-50%, -50%) translateZ(0) scale(1); }
+  45% { transform: translate(-50%, -50%) translateZ(70px) scale(1.18) rotate(8deg); }
+  100% { transform: translate(-50%, -50%) translateZ(0) scale(1); }
+}
+
+@media (max-aspect-ratio: 1/1) {
+  .arena-floor {
+    width: 96%;
+    aspect-ratio: 1 / 1.15;
+    top: 50%;
+  }
+}
+
+/* Atış tasosu uçuşu */
+.shooter-fly {
+  position: absolute;
+  z-index: 40;
+  animation: shooter-fly 0.65s cubic-bezier(0.25, 0.8, 0.3, 1) forwards;
+  pointer-events: none;
+}
+@keyframes shooter-fly {
+  0% { transform: translate(-50%, -50%) translate3d(var(--sx), var(--sy), 0) scale(1.6) rotate(0deg); opacity: 0.9; }
+  70% { transform: translate(-50%, -50%) translate3d(0, 0, 0) scale(1) rotate(540deg); opacity: 1; }
+  100% { transform: translate(-50%, -50%) translate3d(0, 0, 0) scale(0.95) rotate(600deg); opacity: 1; }
+}
+.impact-ring {
+  position: absolute;
+  z-index: 30;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: 4px solid rgba(255, 255, 255, 0.85);
+  animation: ring 0.6s ease-out forwards;
+  pointer-events: none;
+}
+@keyframes ring {
+  from { transform: translate(-50%, -50%) scale(0.4); opacity: 1; }
+  to { transform: translate(-50%, -50%) scale(5); opacity: 0; }
+}
+.table-shake {
+  animation: shake 0.35s linear;
+}
+@keyframes shake {
+  0%, 100% { transform: translate(0, 0); }
+  20% { transform: translate(-5px, 3px); }
+  40% { transform: translate(5px, -3px); }
+  60% { transform: translate(-3px, -2px); }
+  80% { transform: translate(3px, 2px); }
+}
+
+/* Banner */
+.banner {
+  animation: banner 1.3s ease-out forwards;
+  pointer-events: none;
+}
+@keyframes banner {
+  0% { transform: scale(0.4) rotate(-6deg); opacity: 0; }
+  20% { transform: scale(1.15) rotate(-3deg); opacity: 1; }
+  70% { transform: scale(1) rotate(-3deg); opacity: 1; }
+  100% { transform: scale(1.05) rotate(-3deg) translateY(-30px); opacity: 0; }
+}
+
+/* Zamanlama barı */
+.timing-bar {
+  position: relative;
+  width: 54px;
+  height: min(48vh, 360px);
+  border-radius: 28px;
+  background: linear-gradient(180deg, #0f172a, #1e293b);
+  box-shadow:
+    inset 0 0 0 3px rgba(255, 255, 255, 0.25),
+    0 10px 30px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+  touch-action: none;
+}
+.timing-zone {
+  position: absolute;
+  left: 0;
+  right: 0;
+  background: linear-gradient(180deg, #ef4444, #b91c1c);
+  box-shadow: 0 0 18px rgba(239, 68, 68, 0.85);
+}
+.timing-center {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: rgba(255, 255, 255, 0.9);
+}
+.timing-pointer {
+  position: absolute;
+  left: -4px;
+  right: -4px;
+  height: 8px;
+  border-radius: 6px;
+  background: #fde047;
+  box-shadow: 0 0 12px #fde047;
+}
+
+.pop {
+  animation: pop 0.35s ease-out;
+}
+@keyframes pop {
+  from { transform: scale(0.85); opacity: 0; }
+  to { transform: scale(1); opacity: 1; }
+}
